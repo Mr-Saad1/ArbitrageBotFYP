@@ -1,0 +1,28 @@
+version: "3.9"
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arbitragebot-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    container_name: arbitragebot-frontend
+    working_dir: /app
+    volumes:
+      - ./Frontend:/app
+    command: sh -lc "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    restart: unless-stopped
