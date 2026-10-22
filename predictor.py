@@ -1,65 +1,99 @@
-import torch
-import torch.nn as nn
-import numpy as np
 import os
 
-class GRUNet(nn.Module):
-    def __init__(self, input_dim=1, hidden_dim=50, output_dim=1, n_layers=2, drop_prob=0.2):
-        super(GRUNet, self).__init__()
-        self.hidden_dim = hidden_dim
-        self.n_layers = n_layers
-        self.gru = nn.GRU(input_dim, hidden_dim, n_layers, batch_first=True, dropout=drop_prob)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-        self.relu = nn.ReLU()
-        
-    def forward(self, x, h):
-        out, h = self.gru(x, h)
-        out = self.fc(self.relu(out[:, -1]))
-        return out, h
+import ccxt.async_support as ccxt
+from dotenv import load_dotenv
 
-class Predictor:
-    def __init__(self):
-        self.model = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.min_val = None
-        self.max_val = None
+load_dotenv()
 
-    def load(self, model_path='gru_model.pth', scaler_path='scaler_params.npy'):
-        self.model = GRUNet(1, 50, 1, 2).to(self.device)
-        
-        if os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            self.model.eval()
-            print("[OK] PyTorch Model Loaded.")
-        else:
-            print(f"[ERROR]: {model_path} not found!")
 
-        if os.path.exists(scaler_path):
-            params = np.load(scaler_path)
-            self.min_val = params[0]
-            self.max_val = params[1]
-            print("[OK] Scaler Loaded.")
+class TradeExecutor:
+    def __init__(self, binance_api=None, binance_secret=None, bybit_api="", bybit_secret="", testnet=True):
+        binance_api = binance_api or os.getenv("BINANCE_TESTNET_API_KEY") or ""
+        binance_secret = binance_secret or os.getenv("BINANCE_TESTNET_SECRET") or ""
+        bybit_api = bybit_api or os.getenv("BYBIT_TESTNET_API_KEY") or ""
+        bybit_secret = bybit_secret or os.getenv("BYBIT_TESTNET_SECRET") or ""
 
-    def predict(self, data_sequence):
-        if self.model is None or self.min_val is None:
-            return 0.0
+        self.binance = ccxt.binance({
+            "apiKey": binance_api,
+            "secret": binance_secret,
+            "enableRateLimit": True,
+            "proxies": {},
+            "options": {
+                "adjustForTimeDifference": True,
+                "recvWindow": 10000,
+            },
+        })
 
-        data_sequence = np.array(data_sequence).flatten()
-        scaled = (data_sequence - self.min_val) / (self.max_val - self.min_val)
-        input_tensor = torch.Tensor(scaled).view(1, 10, 1).to(self.device)
-        
-        with torch.no_grad():
-            h = torch.zeros(2, 1, 50).to(self.device)
-            prediction, _ = self.model(input_tensor, h)
-            
-        predicted_val = prediction.item() 
-        unscaled_pred = predicted_val * (self.max_val - self.min_val) + self.min_val
-        
-        return unscaled_pred
+        bybit_opts = {
+            "apiKey": bybit_api,
+            "secret": bybit_secret,
+            "enableRateLimit": True,
+        }
+        bybit_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+        if bybit_proxy:
+            bybit_opts["proxies"] = {
+                "http": bybit_proxy,
+                "https": bybit_proxy,
+            }
+        self.bybit = ccxt.bybit(bybit_opts)
 
-if __name__ == "__main__":
-    p = Predictor()
-    p.load()
-    dummy_input = [0.01, 0.012, 0.011, 0.015, 0.014, 0.016, 0.013, 0.011, 0.012, 0.015]
-    result = p.predict(dummy_input)
-    print(f"Next Predicted Spread: {float(result):.6f}%")
+        if testnet:
+            self.binance.set_sandbox_mode(True)
+            self.bybit.set_sandbox_mode(True)
+
+    async def close(self):
+        await self.binance.close()
+        await self.bybit.close()
+
+    async def check_balances(self):
+        print("🔄 Connecting to Testnets...")
+        try:
+            bin_balance = await self.binance.fetch_balance()
+            print("\n🟡 --- BINANCE TESTNET BALANCE ---")
+            print(f"USDT: {bin_balance.get('USDT', {}).get('free', 0)}")
+            print(f"BTC: {bin_balance.get('BTC', {}).get('free', 0)}")
+        except Exception as exc:
+            print(f"❌ Binance Connection Error: {exc}")
+
+        try:
+            byb_balance = await self.bybit.fetch_balance()
+            print("\n⚫ --- BYBIT TESTNET BALANCE ---")
+            print(f"USDT: {byb_balance.get('USDT', {}).get('free', 0)}")
+            print(f"BTC: {byb_balance.get('BTC', {}).get('free', 0)}")
+            print("----------------------------------\n")
+        except Exception as exc:
+            print(f"❌ Bybit Connection Error: {exc}")
+
+    async def execute_test_trade(self, symbol='BTC/USDT', amount=0.01):
+        print(f"🚀 Initiating Market Buy: {amount} {symbol} on Binance...")
+        try:
+            order = await self.binance.create_market_buy_order(symbol, amount)
+            print("✅ SUCCESS! Trade Executed.")
+            print(f"📋 Order ID: {order['id']}")
+            print(f"💵 Average Price: {order.get('average', order.get('price', 'N/A'))}")
+            print(f"💰 Total Cost: {order.get('cost', 'N/A')} USDT\n")
+            return order
+        except Exception as exc:
+            print(f"❌ Trade Failed: {exc}")
+            return None
+
+    async def execute_arbitrage(self, symbol='BTC/USDT', amount=0.01):
+        print("\n⚡ --- INITIATING ARBITRAGE EXECUTION --- ⚡")
+        print("🟢 Leg 1: Executing Real BUY on Binance...")
+        binance_order = await self.execute_test_trade(symbol, amount)
+
+        if not binance_order:
+            print("❌ Binance trade failed. Aborting arbitrage.")
+            return False
+
+        print("🔴 Leg 2: Attempting SELL on Bybit...")
+        try:
+            bybit_order = await self.bybit.create_market_sell_order(symbol, amount)
+            print("✅ SUCCESS! Sold Phase 2 on Bybit.")
+            print(f"📋 Order ID: {bybit_order['id']}")
+            print(f"💵 Average Price: {bybit_order.get('average', bybit_order.get('price', 'N/A'))}")
+            return True
+        except Exception as exc:
+            print(f"❌ Bybit Network/Execution Failed: {exc}")
+            print("⚠️ NOTE: Arb is broken since Leg 1 executed but Leg 2 failed.")
+            return False

@@ -1,145 +1,103 @@
-import os
-import json
-import re
+import sqlite3
 import logging
-from google import genai
-from groq import Groq
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# Setup basic logging for this module
 logger = logging.getLogger(__name__)
 
-class AIAgent:
-    def __init__(self, api_key: str, groq_api_key: str = None):
-        """
-        Initializes the AI Agent with the modern google-genai SDK.
-        """
-        if not api_key:
-            logger.error("CRITICAL: Gemini API key is missing! AI features will fail.")
-            
-        # v1.0+ Syntax: Instantiate the Client directly
-        self.client = genai.Client(api_key=api_key)
-        self.model_id = 'gemini-2.0-flash'
-        
-        # Store Groq key for Tier 1 fallback (if used later)
-        self.groq_api_key = groq_api_key
 
-    def _clean_and_parse_json(self, raw_text: str) -> dict:
-        """
-        Strips markdown wrappers and enforces a strict fallback schema.
-        """
-        fallback_schema = {
-            "decision": "WAIT",
-            "confidence": 0,
-            "position_size": 0.0,
-            "reasoning": "Failsafe triggered: LLM output was unparsable or API failed."
-        }
+class RiskEngine:
+    def __init__(self, db_path="arbitrage.db", max_risk_per_trade=0.02, kelly_fraction=0.2, daily_loss_limit=50.0):
+        self.db_path = db_path
+        self.max_risk_per_trade = max_risk_per_trade
+        self.kelly_fraction = kelly_fraction
+        self.daily_loss_limit = daily_loss_limit
 
-        if not raw_text:
-            return fallback_schema
-
+    def get_daily_pnl(self) -> float:
         try:
-            # Regex to aggressively strip ```json and ``` tags
-            cleaned_text = re.sub(r'```json\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
-            
-            # If no 'json' tag was found but backticks remain, simple strip
-            if "```" in cleaned_text:
-                cleaned_text = cleaned_text.replace("```", "").strip()
-            
-            parsed_data = json.loads(cleaned_text)
-            
-            # Schema Validation: Ensure required keys exist
-            for key in ["decision", "confidence", "reasoning"]:
-                if key not in parsed_data:
-                    logger.warning(f"Missing key '{key}' in LLM response. Using fallback.")
-                    return fallback_schema
-                    
-            return parsed_data
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON Parsing Error: {str(e)}. Raw text: {raw_text}")
-            return fallback_schema
-        except Exception as e:
-            logger.error(f"Unexpected error in JSON parser: {str(e)}")
-            return fallback_schema
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()]
+                if "profit" in columns:
+                    result = conn.execute(
+                        "SELECT SUM(profit) AS daily_pnl FROM trades WHERE timestamp >= datetime('now', '-1 day')"
+                    ).fetchone()
+                elif "profit_usdt" in columns:
+                    result = conn.execute(
+                        "SELECT SUM(profit_usdt) AS daily_pnl FROM trades WHERE timestamp >= datetime('now', '-1 day')"
+                    ).fetchone()
+                else:
+                    return 0.0
+                return float(result["daily_pnl"] or 0.0)
+        except Exception as exc:
+            logger.error(f"Risk Engine DB Error: {exc}")
+            return 0.0
 
-    async def analyze_opportunity(self, binance_price: float, bybit_price: float, spread: float) -> dict:
-        """Analyzes the spread using Gemini, with an automatic fallback to Groq."""
-        
-        prompt = f"""
-        Arbitrage Opportunity Detected!
-        Binance Price: ${binance_price}
-        Bybit Price: ${bybit_price}
-        Spread: {spread}%
-
-        Analyze this spread. Is it safe to trade? 
-        Consider fee/slippage overhead (~0.25%).
-        
-        Respond ONLY in valid JSON format:
-        {{
-            "decision": "EXECUTE" or "REJECT", 
-            "reasoning": "Short explanation", 
-            "confidence": 0-100,
-            "position_size": 0.0
-        }}
-        """
-
-        # --- ATTEMPT 1: PRIMARY AI (GEMINI) ---
-        if self.client:
-            try:
-                # v1.0+ Syntax: generate_content is called on client.models
-                # Pushing the synchronous API call to a background thread to prevent event loop blockage
-                response = await asyncio.to_thread(
-                    self.client.models.generate_content,
-                    model=self.model_id,
-                    contents=prompt
-                )
-                return self._clean_and_parse_json(response.text)
-            
-            except Exception as e_gemini:
-                logger.error(f"❌ Gemini API Error: {e_gemini}")
-                logger.info("🔄 Switching to Fallback AI (Groq)...")
-        else:
-            logger.warning("No Gemini Client configured. Switching to Fallback AI (Groq)...")
-
-        # --- ATTEMPT 2: FALLBACK AI (GROQ) ---
-        if self.groq_client:
-            try:
-                chat_completion = self.groq_client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model="llama-3.1-8b-instant",
-                    response_format={"type": "json_object"}
-                )
-                return json.loads(chat_completion.choices[0].message.content)
-            except Exception as e_groq:
-                logger.error(f"❌ Fallback AI Error: {e_groq}")
-        else:
-            logger.warning("No Groq client configured. Cannot use fallback.")
-
-        # --- ATTEMPT 3: FAIL-SAFE ABORT ---
-        return {
-            "decision": "REJECT", 
-            "reason": "All AI models unreachable. Safety abort.", 
-            "confidence": 0
-        }
-
-    async def chat(self, question: str, system_prompt: str = "You are a helpful assistant.") -> str:
-        """General chat interface for the dashboard assistant."""
-        if not self.client:
-            return "AI Agent is not configured. Please check your API keys."
-
+    def get_recent_trades(self, limit=100):
         try:
-            # v1.0+ Syntax for Chat
-            response = self.client.models.generate_content(
-                model=self.model_id,
-                contents=[
-                    {"role": "user", "parts": [{"text": f"System Instruction: {system_prompt}\n\nUser Question: {question}"}]}
-                ]
-            )
-            return response.text
-        except Exception as e:
-            logger.error(f"Chat Error: {e}")
-            return "I'm having trouble connecting to my brain right now. Please try again later."
-
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()]
+                if "profit" in columns:
+                    rows = conn.execute("SELECT profit FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                    return [float(row["profit"] or 0.0) for row in rows]
+                if "profit_usdt" in columns:
+                    rows = conn.execute("SELECT profit_usdt FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                    return [float(row["profit_usdt"] or 0.0) for row in rows]
+                return []
+        except Exception:
+            return []
+
+    def check_circuit_breaker(self) -> dict:
+        daily_pnl = self.get_daily_pnl()
+        if daily_pnl <= -abs(self.daily_loss_limit):
+            logger.critical(f"CIRCUIT BREAKER: Daily loss limit (${self.daily_loss_limit}) exceeded.")
+            return {"halted": True, "reason": "Daily Drawdown Exceeded"}
+
+        trades = self.get_recent_trades(limit=3)
+        if len(trades) == 3 and all(p < 0 for p in trades):
+            logger.warning("CIRCUIT BREAKER: 3 consecutive losses detected.")
+            return {"halted": True, "reason": "Consecutive Loss Streak"}
+
+        return {"halted": False, "reason": "System Healthy"}
+
+    def calculate_kelly_position(self, ai_confidence: int) -> float:
+        trades = self.get_recent_trades(limit=100)
+        base_size = self.max_risk_per_trade * 0.10
+
+        if len(trades) < 10:
+            return base_size
+
+        wins = [t for t in trades if t > 0]
+        losses = [t for t in trades if t <= 0]
+
+        if not losses or not wins:
+            return base_size
+
+        historical_win_rate = len(wins) / len(trades)
+        blended_win_rate = (historical_win_rate * 0.5) + ((ai_confidence / 100.0) * 0.5)
+        loss_rate = 1.0 - blended_win_rate
+
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+
+        if avg_loss == 0:
+            return base_size
+
+        b = avg_win / avg_loss
+        kelly_fraction = (b * blended_win_rate - loss_rate) / b
+        adjusted_kelly = max(0, kelly_fraction * self.kelly_fraction)
+        return min(adjusted_kelly, self.max_risk_per_trade)
+
+    def validate_and_size_trade(self, llm_decision: str, llm_confidence: int) -> dict:
+        breaker_status = self.check_circuit_breaker()
+        if breaker_status["halted"]:
+            return {"approved": False, "reason": breaker_status["reason"], "size": 0}
+
+        if llm_decision in ["WAIT", "REJECT"]:
+            return {"approved": False, "reason": "AI Veto", "size": 0}
+
+        optimal_size = self.calculate_kelly_position(ai_confidence=llm_confidence)
+
+        if optimal_size <= 0:
+            return {"approved": False, "reason": "Kelly sizing <= 0 (EV is negative)", "size": 0}
+
+        return {"approved": True, "reason": "Risk checks passed", "size": optimal_size}

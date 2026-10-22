@@ -1,79 +1,55 @@
-import os
-import json
-import re
-import logging
 import asyncio
-from google import genai
+import logging
+import os
+
 from dotenv import load_dotenv
+from google import genai
+
+from llm.ai_agent import AIAgent
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-class MarketAnalyst:
+
+class ChatBot:
     def __init__(self, api_key: str = None):
-        """Tier 2 LLM: Analyzes broad market conditions from OHLC data."""
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.agent = AIAgent(api_key=self.api_key)
+
         if self.api_key:
             self.client = genai.Client(api_key=self.api_key)
-            self.model_id = 'gemini-2.0-flash'
+            self.model_id = "gemini-2.0-flash"
         else:
             self.client = None
-            logger.error("CRITICAL: MarketAnalyst initialized without API Key!")
+            logger.error("CRITICAL: ChatBot initialized without API key!")
 
-    def _clean_and_parse_json(self, raw_text: str) -> dict:
-        """Defensive JSON parsing using the exact logic from AIAgent."""
-        fallback = {
-            "regime": "VOLATILE", 
-            "volatility": 5, 
-            "sentiment": 0.0, 
-            "support": 0.0, 
-            "resistance": 0.0, 
-            "reasoning": "Failsafe triggered: Parse failed or API offline."
-        }
-        if not raw_text: return fallback
-        try:
-            # Regex to aggressively strip ```json and ``` tags
-            cleaned = re.sub(r'```json\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
-            if "```" in cleaned: 
-                cleaned = cleaned.replace("```", "").strip()
-            
-            parsed_data = json.loads(cleaned)
-            
-            # Schema Validation: Ensure required keys exist
-            for key in ["regime", "volatility", "sentiment", "support", "resistance"]:
-                if key not in parsed_data:
-                    logger.warning(f"Missing key '{key}' in MarketAnalyst response. Using fallback.")
-                    return fallback
-                    
-            return parsed_data
-        except Exception as e:
-            logger.error(f"MarketAnalyst JSON Error: {e}")
-            return fallback
+        self.system_prompt = (
+            "You are ArbPro, a Senior Quantitative Cryptocurrency Arbitrage Analyst. "
+            "Your job is to explain trading decisions, analyze spreads between Binance and Bybit, "
+            "and evaluate market risk. Do not answer general knowledge or non-financial questions. "
+            "Keep answers concise, professional, and focused on actionable quantitative metrics."
+        )
 
-    async def analyze_regime(self, recent_prices: list) -> dict:
-        """Determines if the market is trending, ranging, or volatile."""
+    async def process_chat_query(self, user_query: str, market_context: dict = None) -> str:
         if not self.client:
-            return self._clean_and_parse_json("")
-            
-        prompt = f"""
-        You are ArbPro's Market Intelligence Engine.
-        Analyze this recent BTC price action: {recent_prices}
-        
-        Identify the market regime, volatility (0-10 scale), and sentiment (-1.0 to 1.0).
-        Estimate primary support and resistance levels.
-        
-        Respond ONLY in raw JSON matching this schema exactly:
-        {{"regime": "TRENDING" or "RANGING" or "VOLATILE", "volatility": integer 0-10, "sentiment": float -1.0 to 1.0, "support": float, "resistance": float, "reasoning": "brief string explanation"}}
-        """
-        
+            return "System Error: AI is offline due to missing API key."
+
+        context_str = f"\n[Current Market Context]: {market_context}" if market_context else "\n[Current Market Context]: None provided."
+        full_prompt = f"{self.system_prompt}{context_str}\n\nUser Question: {user_query}"
+
         try:
-            # Run the sync SDK call in an async thread
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
                 model=self.model_id,
-                contents=prompt
+                contents=full_prompt,
             )
-            return self._clean_and_parse_json(response.text)
-        except Exception as e:
-            logger.error(f"MarketAnalyst API Execution Error: {e}")
-            return self._clean_and_parse_json("")
+            return response.text
+        except Exception as exc:
+            logger.error(f"ChatBot Execution Error: {exc}")
+            return "I am currently experiencing technical difficulties connecting to the market oracle."
+
+    async def analyze_opportunity(self, binance_price: float, bybit_price: float, spread: float) -> dict:
+        return await self.agent.analyze_opportunity(binance_price, bybit_price, spread)
+
+
+analyst = ChatBot(api_key=os.getenv("GEMINI_API_KEY"))

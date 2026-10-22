@@ -1,116 +1,235 @@
-import sys
-import os
-import time
-import random
-from dotenv import load_dotenv
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Mail, Lock, Shield, UserPlus, AlertCircle, Command, ChevronRight, Eye, EyeOff, CheckCircle2, Circle } from 'lucide-react';
 
-# --- THE FIX: Tell Python to look in the main folder ---
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
-# -------------------------------------------------------
+const Requirement = ({ fulfilled, text }: { fulfilled: boolean, text: string }) => (
+    <div className={`flex items-center gap-1.5 text-[10px] uppercase tracking-wider transition-colors duration-300 ${fulfilled ? 'text-green-400 font-bold' : 'text-gray-600'}`}>
+        {fulfilled ? <CheckCircle2 size={14} /> : <Circle size={14} />}
+        <span>{text}</span>
+    </div>
+);
 
-from execution.trader import TradeExecutor
-from llm.ai_agent import AIAgent
-from core.database import save_trade
+const Login = () => {
+    const [activeTab, setActiveTab] = useState<'signin' | 'register'>('signin');
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [confirmPassword, setConfirmPassword] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+    const [error, setError] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
+    const navigate = useNavigate();
 
-# 1. Load the hidden keys securely
-load_dotenv(os.path.join(parent_dir, '.env'))
+    useEffect(() => {
+        setError('');
+        setPassword('');
+        setConfirmPassword('');
+    }, [activeTab]);
 
-bin_api = os.getenv("BINANCE_TESTNET_API_KEY")
-bin_secret = os.getenv("BINANCE_TESTNET_SECRET")
-byb_api = os.getenv("BYBIT_TESTNET_API_KEY")
-byb_secret = os.getenv("BYBIT_TESTNET_SECRET")
+    const hasLength = password.length >= 8;
+    const hasUpper = /[A-Z]/.test(password);
+    const hasNumber = /\d/.test(password);
+    const hasSpecial = /[^A-Za-z0-9]/.test(password);
+    const isPasswordValid = hasLength && hasUpper && hasNumber && hasSpecial;
+    const passwordsMatch = password === confirmPassword && password !== '';
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-# 2. Initialize the components
-trader = TradeExecutor(
-    binance_api=bin_api,
-    binance_secret=bin_secret,
-    bybit_api=byb_api,
-    bybit_secret=byb_secret,
-    testnet=True
-)
+    const handleAuth = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        setIsLoading(true);
 
-ai_bot = AIAgent()
+        const API_URL = "http://127.0.0.1:8000";
 
-import asyncio
+        try {
+            const isRegistering = activeTab === 'register';
 
-async def run_arbitrage_bot(ui_handle=None):
-    """
-    Main bot loop (Async version). 
-    ui_handle: If provided, sends logs to the Tkinter GUI.
-    """
-    
-    # Helper function to log to both Terminal and GUI
-    def log_message(msg):
-        print(msg)
-        if ui_handle:
-            ui_handle.log(msg)
+            if (isRegistering) {
+                if (!emailRegex.test(email)) throw new Error("Invalid email format.");
+                if (!isPasswordValid) throw new Error("Security requirements not met.");
+                if (!passwordsMatch) throw new Error("Keys do not match.");
+            }
 
-    log_message("\n🧠 --- AI ARBITRAGE SYSTEM ONLINE --- 🧠")
-    log_message("Monitoring Live Binance Data & Consulting Gemini AI...\n")
-    
-    last_ai_call = 0  
-    ai_cooldown = 60  
+            const endpoint = isRegistering ? `${API_URL}/api/register` : `${API_URL}/api/login`;
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: email, password }),
+            });
 
-    try:
-        while True:
-            try:
-                # 1. Fetch Real Binance Price
-                # Need to use await here because trader.binance is an async ccxt instance
-                binance_ticker = await trader.binance.fetch_ticker('BTC/USDT')
-                binance_price = binance_ticker['last']
-                
-                # 2. Simulate Bybit Price
-                fluctuation = random.uniform(-0.005, 0.015) 
-                bybit_price = binance_price * (1 + fluctuation)
-                
-                # 3. Calculate Spread
-                spread_percent = ((bybit_price - binance_price) / binance_price) * 100
-                
-                # Live Output
-                status_msg = f"📊 Binance: {binance_price:.2f} | Bybit (Sim): {bybit_price:.2f} | Spread: {spread_percent:.2f}%"
-                log_message(status_msg)
-                
-                # 4. Smart AI-DRIVEN DECISION LOGIC
-                current_time = time.time()
-                
-                if spread_percent >= 1.0:
-                    if (current_time - last_ai_call) > ai_cooldown:
-                        log_message(f"🔍 Significant Opportunity ({spread_percent:.2f}%). Consulting AI Agent...")
-                        
-                        # AIAgent analyze_opportunity is now async
-                        ai_analysis = await ai_bot.analyze_opportunity(binance_price, bybit_price, spread_percent)
-                        last_ai_call = time.time() 
-                        
-                        decision = ai_analysis.get("decision")
-                        reason = ai_analysis.get("reason")
-                        conf = ai_analysis.get("confidence")
+            const contentType = response.headers.get("content-type") || "";
+            if (!contentType.includes("application/json")) {
+                throw new Error("Server error. Check Python terminal.");
+            }
 
-                        if decision == "EXECUTE":
-                            log_message(f"🤖 AI APPROVED: {reason} (Confidence: {conf})")
-                            
-                            # 🔥 EXECUTE THE TRADE (Async)
-                            await trader.execute_arbitrage('BTC/USDT', 0.01)
-                            
-                            # Record the trade in the shared database
-                            save_trade("BINANCE ➔ BYBIT", round((spread_percent / 100) * binance_price * 0.01, 2))
-                            
-                            log_message("⏳ Trade complete. Cooldown for 15 seconds...\n")
-                            await asyncio.sleep(15)
-                        else:
-                            log_message(f"✋ AI REJECTED: {reason} (Confidence: {conf})")
-                    else:
-                        wait_remaining = int(ai_cooldown - (current_time - last_ai_call))
-                        log_message(f"⏳ Spread is good ({spread_percent:.2f}%), but AI is on cooldown ({wait_remaining}s remaining).")
-                
-                await asyncio.sleep(3)
-                
-            except Exception as e:
-                log_message(f"❌ Error in Brain Loop: {e}")
-                await asyncio.sleep(10)
-    finally:
-        await trader.close()
+            const data = await response.json();
+            if (response.ok) {
+                if (isRegistering) {
+                    alert("Profile Registered Locally. You can now Sign In.");
+                    setActiveTab('signin');
+                } else {
+                    const token = data.token || data.access_token;
+                    if (!token) throw new Error("Authentication token missing.");
+                    localStorage.setItem('token', token);
+                    navigate('/', { replace: true });
+                }
+            } else {
+                setError(data.detail || "Authentication Failed.");
+            }
+        } catch (err: any) {
+            console.error("Auth Error:", err);
+            setError(err.message === "Failed to fetch" ? "Backend Offline. Run python main.py" : err.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
-if __name__ == "__main__":
-    asyncio.run(run_arbitrage_bot())
+    const isRegister = activeTab === 'register';
+
+    return (
+        <div className="min-h-screen bg-[#050505] flex items-center justify-center p-4 font-sans text-gray-200 selection:bg-green-500/30 relative overflow-hidden">
+            <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-green-500/5 rounded-full blur-[120px] animate-pulse"></div>
+            <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-green-500/5 rounded-full blur-[120px] animate-pulse" style={{ animationDelay: '1s' }}></div>
+
+            <div className="glass-card p-10 rounded-[2rem] w-full max-w-md transition-all duration-500 relative z-10">
+                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1/2 h-px bg-gradient-to-r from-transparent via-green-500/50 to-transparent"></div>
+
+                <div className="flex flex-col items-center mb-10 text-center">
+                    <div className="w-16 h-16 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-center mb-5 text-green-500 shadow-[0_0_20px_rgba(34,197,94,0.15)] group hover:scale-105 transition-all">
+                        <Command size={32} className="group-hover:rotate-12 transition-transform" />
+                    </div>
+                    <h1 className="text-2xl font-black text-white tracking-widest uppercase text-shadow-glow">Arbitrage Bot</h1>
+                    <div className="flex items-center gap-2 mt-2">
+                        <span className="h-px w-4 bg-gray-700"></span>
+                        <p className="text-[10px] text-gray-400 uppercase tracking-[0.3em] font-bold">
+                            {isRegister ? 'Operator Deployment' : 'Neural Access'}
+                        </p>
+                        <span className="h-px w-4 bg-gray-700"></span>
+                    </div>
+                </div>
+
+                <div className="flex bg-black/40 p-1.5 rounded-2xl mb-10 border border-white/5 shadow-inner">
+                    <button
+                        type="button"
+                        onClick={() => setActiveTab('signin')}
+                        className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all duration-300 flex items-center justify-center gap-2 ${!isRegister ? 'bg-green-500 text-black shadow-[0_0_20px_rgba(34,197,94,0.2)]' : 'text-gray-400 hover:text-gray-200'}`}
+                    >
+                        <Shield size={14} /> Neural Sign In
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setActiveTab('register')}
+                        className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all duration-300 flex items-center justify-center gap-2 ${isRegister ? 'bg-green-500 text-black shadow-[0_0_20px_rgba(34,197,94,0.2)]' : 'text-gray-400 hover:text-gray-200'}`}
+                    >
+                        <UserPlus size={14} /> Register Node
+                    </button>
+                </div>
+
+                <form onSubmit={handleAuth} className="space-y-6">
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-2">Operator ID</label>
+                        <div className="relative flex items-center group">
+                            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                                <Mail className="text-gray-500 group-focus-within:text-green-500 transition-colors" size={18} />
+                            </div>
+                            <input
+                                type="email"
+                                placeholder="operator@arbitragebot.io"
+                                value={email}
+                                required
+                                onChange={e => setEmail(e.target.value)}
+                                className="w-full bg-black/40 border border-white/5 rounded-2xl py-4 pl-12 pr-4 text-sm text-white outline-none focus:border-green-500/50 focus:ring-1 focus:ring-green-500/20"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-2">Neural Key</label>
+                        <div className="relative flex items-center group">
+                            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                                <Lock className="text-gray-500 group-focus-within:text-green-500 transition-colors" size={18} />
+                            </div>
+                            <input
+                                type={showPassword ? "text" : "password"}
+                                placeholder="••••••••••••"
+                                value={password}
+                                required
+                                onChange={e => setPassword(e.target.value)}
+                                className="w-full bg-black/40 border border-white/5 rounded-2xl py-4 pl-12 pr-14 text-sm text-white outline-none focus:border-green-500/50 focus:ring-1 focus:ring-green-500/20"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowPassword(!showPassword)}
+                                className="absolute right-4 text-gray-500 hover:text-green-500 transition-colors p-2"
+                            >
+                                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                            </button>
+                        </div>
+                    </div>
+
+                    {isRegister && (
+                        <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-500">
+                            <div className="space-y-2">
+                                <label className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-2">Verify Key</label>
+                                <div className={`relative flex items-center border rounded-2xl transition-all ${confirmPassword ? (passwordsMatch ? 'border-green-500/50' : 'border-red-500/50') : 'border-white/5'}`}>
+                                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                                        <Lock className={`${confirmPassword ? (passwordsMatch ? 'text-green-500' : 'text-red-500') : 'text-gray-500'}`} size={18} />
+                                    </div>
+                                    <input
+                                        type={showPassword ? "text" : "password"}
+                                        placeholder="Repeat encryption key"
+                                        value={confirmPassword}
+                                        required
+                                        onChange={e => setConfirmPassword(e.target.value)}
+                                        className="w-full bg-black/40 rounded-2xl py-4 pl-12 pr-4 text-sm text-white outline-none font-medium placeholder:text-gray-700"
+                                    />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-4">
+                                <Requirement fulfilled={hasLength} text="8+ Symb" />
+                                <Requirement fulfilled={hasUpper} text="Upper Case" />
+                                <Requirement fulfilled={hasNumber} text="Numeral" />
+                                <Requirement fulfilled={hasSpecial} text="Special" />
+                            </div>
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="flex items-center gap-3 bg-red-500/10 border border-red-500/20 p-4 rounded-2xl text-red-400 text-[11px] font-bold uppercase tracking-wider animate-in shake">
+                            <AlertCircle size={18} className="shrink-0" />
+                            <p>{error}</p>
+                        </div>
+                    )}
+
+                    <button
+                        type="submit"
+                        disabled={isLoading || (isRegister && (!isPasswordValid || !passwordsMatch))}
+                        className="w-full bg-gradient-to-r from-green-500 to-green-600 hover:from-green-500/90 hover:to-green-600/90 text-black font-black uppercase tracking-[0.2em] py-5 rounded-[1.5rem] relative overflow-hidden group disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                        <div className="absolute top-0 left-[-100%] w-full h-full bg-gradient-to-r from-transparent via-white/20 to-transparent group-hover:left-[100%] transition-all duration-700"></div>
+                        <span className="relative flex items-center justify-center gap-3">
+                            {isLoading ? (
+                                <>
+                                    <div className="w-5 h-5 border-[3px] border-black/20 border-t-black rounded-full animate-spin"></div>
+                                    Processing...
+                                </>
+                            ) : (
+                                <>
+                                    {isRegister ? 'Initialize Node' : 'Initialize Session'}
+                                    <ChevronRight size={20} className="group-hover:translate-x-1.5 transition-transform" />
+                                </>
+                            )}
+                        </span>
+                    </button>
+
+                    {!isRegister && (
+                        <p className="text-center text-[10px] text-gray-600 font-bold uppercase tracking-[0.2em] pt-4">
+                            Secured by Arbitrage Bot Cryptographic Core
+                        </p>
+                    )}
+                </form>
+            </div>
+        </div>
+    );
+};
+
+export default Login;

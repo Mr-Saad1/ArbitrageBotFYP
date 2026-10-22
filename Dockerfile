@@ -1,0 +1,12 @@
+JWT_SECRET_KEY=change-me-in-production
+JWT_ALGORITHM=HS256
+GEMINI_API_KEY=your_gemini_api_key
+GROQ_API_KEY=your_groq_api_key
+BINANCE_TESTNET_API_KEY=your_binance_key
+BINANCE_TESTNET_SECRET=your_binance_secret
+BYBIT_TESTNET_API_KEY=your_bybit_key
+BYBIT_TESTNET_SECRET=your_bybit_secret
+TRADES_DB=arbitrage.db
+VAULT_DB=operator_vault.db
+PORT=8000
+HOST=0.0.0.0

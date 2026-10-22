@@ -1,104 +1,92 @@
+import asyncio
+import json
+import logging
 import os
-import ccxt.async_support as ccxt
+import re
+import sqlite3
+
 from dotenv import load_dotenv
+from google import genai
 
-class TradeExecutor:
-    def __init__(self, binance_api, binance_secret, bybit_api="", bybit_secret="", testnet=True):
-        # Initialize Binance
-        self.binance = ccxt.binance({
-            'apiKey': binance_api,
-            'secret': binance_secret,
-            'enableRateLimit': True,
-            'proxies': {},  # Force no proxy for Binance to avoid local stalls
-            'options': {
-                'adjustForTimeDifference': True,
-                'recvWindow': 10000
-            }
-        })
-        
-        # Initialize Bybit
-        bybit_opts = {
-            'apiKey': bybit_api,
-            'secret': bybit_secret,
-            'enableRateLimit': True,
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+class StrategyAdvisor:
+    def __init__(self, db_path="arbitrage.db", api_key: str = None):
+        self.db_path = db_path
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if self.api_key:
+            self.client = genai.Client(api_key=self.api_key)
+            self.model_id = "gemini-2.0-flash"
+        else:
+            self.client = None
+            logger.error("CRITICAL: StrategyAdvisor initialized without API Key!")
+
+    def fetch_recent_trades(self, limit=50):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()]
+                if "profit" in columns:
+                    cursor = conn.execute("SELECT profit, route, timestamp FROM trades ORDER BY id DESC LIMIT ?", (limit,))
+                elif "profit_usdt" in columns:
+                    cursor = conn.execute("SELECT profit_usdt, route, timestamp FROM trades ORDER BY id DESC LIMIT ?", (limit,))
+                else:
+                    return []
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as exc:
+            logger.error(f"StrategyAdvisor DB Error: {exc}")
+            return []
+
+    def _clean_and_parse_json(self, raw_text: str) -> dict:
+        fallback = {
+            "suggested_spread_threshold": 0.5,
+            "portfolio_health": "UNKNOWN",
+            "recommendation": "Failsafe triggered: Hold steady. Parsing failed or API offline.",
         }
-        
-        # Conditionally add proxy configuration for Bybit if defined in env to bypass ISP block
-        bybit_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-        if bybit_proxy:
-            bybit_opts['proxies'] = {
-                'http': bybit_proxy,
-                'https': bybit_proxy,
-            }
+        if not raw_text:
+            return fallback
 
-        self.bybit = ccxt.bybit(bybit_opts)
-        
-        # Turn on Testnet mode for BOTH
-        if testnet:
-            self.binance.set_sandbox_mode(True)
-            self.bybit.set_sandbox_mode(True)
-
-    async def close(self):
-        await self.binance.close()
-        await self.bybit.close()
-
-    async def check_balances(self):
-        print("🔄 Connecting to Testnets...")
-        
-        # Check Binance
         try:
-            bin_balance = await self.binance.fetch_balance()
-            print("\n🟡 --- BINANCE TESTNET BALANCE ---")
-            print(f"USDT: {bin_balance.get('USDT', {}).get('free', 0)}")
-            print(f"BTC: {bin_balance.get('BTC', {}).get('free', 0)}")
-        except Exception as e:
-            print(f"❌ Binance Connection Error: {str(e)}")
+            cleaned = re.sub(r"```json\s*(.*?)\s*```", r"\1", raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            if "```" in cleaned:
+                cleaned = cleaned.replace("```", "").strip()
+            parsed_data = json.loads(cleaned)
+            for key in ["suggested_spread_threshold", "portfolio_health", "recommendation"]:
+                if key not in parsed_data:
+                    logger.warning(f"Missing key '{key}' in StrategyAdvisor response. Using fallback.")
+                    return fallback
+            return parsed_data
+        except json.JSONDecodeError as exc:
+            logger.error(f"StrategyAdvisor JSON Parsing Error: {exc}. Raw text: {raw_text}")
+            return fallback
+        except Exception as exc:
+            logger.error(f"StrategyAdvisor JSON Error: {exc}")
+            return fallback
 
-        # Check Bybit
-        try:
-            byb_balance = await self.bybit.fetch_balance()
-            print("\n⚫ --- BYBIT TESTNET BALANCE ---")
-            print(f"USDT: {byb_balance.get('USDT', {}).get('free', 0)}")
-            print(f"BTC: {byb_balance.get('BTC', {}).get('free', 0)}")
-            print("----------------------------------\n")
-        except Exception as e:
-            print(f"❌ Bybit Connection Error: {str(e)}")
+    async def generate_weekly_report(self) -> dict:
+        trades = self.fetch_recent_trades()
+        if not trades or not self.client:
+            return self._clean_and_parse_json("")
 
-    async def execute_test_trade(self, symbol='BTC/USDT', amount=0.01):
-        """Places a Market Buy Order on Binance"""
-        print(f"🚀 Initiating Market Buy: {amount} {symbol} on Binance...")
-        try:
-            order = await self.binance.create_market_buy_order(symbol, amount)
-            print("✅ SUCCESS! Trade Executed.")
-            print(f"📋 Order ID: {order['id']}")
-            print(f"💵 Average Price: {order.get('average', order.get('price', 'N/A'))}")
-            print(f"💰 Total Cost: {order.get('cost', 'N/A')} USDT\n")
-            return order
-        except Exception as e:
-            print(f"❌ Trade Failed: {str(e)}")
+        prompt = f"""
+        You are ArbPro's Strategy Optimizer (Tier 3 AI).
+        Review the last {len(trades)} trades:
+        {trades}
 
-    async def execute_arbitrage(self, symbol='BTC/USDT', amount=0.01):
-        print("\n⚡ --- INITIATING ARBITRAGE EXECUTION --- ⚡")
-        
-        # 1. Real Trade on Binance (e.g., Buying Low)
-        print("🟢 Leg 1: Executing Real BUY on Binance...")
-        binance_order = await self.execute_test_trade(symbol, amount)
-        
-        if not binance_order:
-            print("❌ Binance trade failed. Aborting arbitrage.")
-            return
-            
-        # 2. Real Trade on Bybit (e.g., Selling High) - Now utilizing the proxy
-        print("🔴 Leg 2: Attempting SELL on Bybit...")
+        Analyze our win rate, calculate an estimated Sharpe Ratio, and recommend a new minimum spread threshold.
+        Respond ONLY in raw JSON matching this schema exactly:
+        {{"suggested_spread_threshold": float, "portfolio_health": "POOR" or "GOOD" or "EXCELLENT", "recommendation": "detailed optimization strategy"}}
+        """
+
         try:
-            # Replaced fetch_balance with the real sell execution
-            bybit_order = await self.bybit.create_market_sell_order(symbol, amount)
-            print("✅ SUCCESS! Sold Phase 2 on Bybit.")
-            print(f"📋 Order ID: {bybit_order['id']}")
-            print(f"💵 Average Price: {bybit_order.get('average', bybit_order.get('price', 'N/A'))}")
-        except Exception as e:
-            print(f"❌ Bybit Network/Execution Failed: {str(e)}")
-            print("⚠️ NOTE: Arb is broken since Leg 1 executed but Leg 2 failed.")
-            return
-            
-        print("\n🎉 ARBITRAGE CYCLE COMPLETE! 🎉\n")
+            response = await asyncio.to_thread(
+                self.client.models.generate_content,
+                model=self.model_id,
+                contents=prompt,
+            )
+            return self._clean_and_parse_json(response.text)
+        except Exception as exc:
+            logger.error(f"StrategyAdvisor API Error: {exc}")
+            return self._clean_and_parse_json("")

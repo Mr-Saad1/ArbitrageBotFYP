@@ -1,94 +1,73 @@
-import os
-import json
-import re
-import logging
-import sqlite3
 import asyncio
-from google import genai
+import json
+import logging
+import os
+import re
+
 from dotenv import load_dotenv
+from google import genai
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-class StrategyAdvisor:
-    def __init__(self, db_path="arbpro.db", api_key: str = None):
-        """Tier 3 LLM: Weekly batch processor for portfolio and threshold optimization."""
-        self.db_path = db_path
+
+class MarketAnalyst:
+    def __init__(self, api_key: str = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if self.api_key:
             self.client = genai.Client(api_key=self.api_key)
-            self.model_id = 'gemini-2.0-flash'
+            self.model_id = "gemini-2.0-flash"
         else:
             self.client = None
-            logger.error("CRITICAL: StrategyAdvisor initialized without API Key!")
-
-    def fetch_recent_trades(self, limit=50):
-        """Pulls the most recent trade outcomes from the database."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute("SELECT profit_usdt, spread, timestamp FROM trades ORDER BY id DESC LIMIT ?", (limit,))
-                return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"StrategyAdvisor DB Error: {e}")
-            return []
+            logger.error("CRITICAL: MarketAnalyst initialized without API Key!")
 
     def _clean_and_parse_json(self, raw_text: str) -> dict:
-        """Defensive JSON parsing using the exact logic from the core AI."""
         fallback = {
-            "suggested_spread_threshold": 0.5, 
-            "portfolio_health": "UNKNOWN", 
-            "recommendation": "Failsafe triggered: Hold steady. Parsing failed or API offline."
+            "regime": "VOLATILE",
+            "volatility": 5,
+            "sentiment": 0.0,
+            "support": 0.0,
+            "resistance": 0.0,
+            "reasoning": "Failsafe triggered: Parse failed or API offline.",
         }
-        if not raw_text: return fallback
-        
-        try:
-            # Regex to aggressively strip ```json and ``` tags
-            cleaned = re.sub(r'```json\s*(.*?)\s*```', r'\1', raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
-            
-            # If no 'json' tag was found but backticks remain, simple strip
-            if "```" in cleaned: 
-                cleaned = cleaned.replace("```", "").strip()
-            
-            parsed_data = json.loads(cleaned)
-            
-            # Schema Validation: Ensure required keys exist
-            for key in ["suggested_spread_threshold", "portfolio_health", "recommendation"]:
-                if key not in parsed_data:
-                    logger.warning(f"Missing key '{key}' in StrategyAdvisor response. Using fallback.")
-                    return fallback
-                    
-            return parsed_data
-        except json.JSONDecodeError as e:
-            logger.error(f"StrategyAdvisor JSON Parsing Error: {str(e)}. Raw text: {raw_text}")
+        if not raw_text:
             return fallback
-        except Exception as e:
-            logger.error(f"StrategyAdvisor JSON Error: {e}")
+        try:
+            cleaned = re.sub(r"```json\s*(.*?)\s*```", r"\1", raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            if "```" in cleaned:
+                cleaned = cleaned.replace("```", "").strip()
+            parsed_data = json.loads(cleaned)
+            for key in ["regime", "volatility", "sentiment", "support", "resistance"]:
+                if key not in parsed_data:
+                    logger.warning(f"Missing key '{key}' in MarketAnalyst response. Using fallback.")
+                    return fallback
+            return parsed_data
+        except Exception as exc:
+            logger.error(f"MarketAnalyst JSON Error: {exc}")
             return fallback
 
-    async def generate_weekly_report(self) -> dict:
-        """Analyzes trade history and recommends system configuration changes."""
-        trades = self.fetch_recent_trades()
-        if not trades or not self.client:
+    async def analyze_regime(self, recent_prices: list) -> dict:
+        if not self.client:
             return self._clean_and_parse_json("")
 
         prompt = f"""
-        You are ArbPro's Strategy Optimizer (Tier 3 AI). 
-        Review the last {len(trades)} trades:
-        {trades}
-        
-        Analyze our win rate, calculate an estimated Sharpe Ratio, and recommend a new minimum spread threshold.
+        You are ArbPro's Market Intelligence Engine.
+        Analyze this recent BTC price action: {recent_prices}
+
+        Identify the market regime, volatility (0-10 scale), and sentiment (-1.0 to 1.0).
+        Estimate primary support and resistance levels.
+
         Respond ONLY in raw JSON matching this schema exactly:
-        {{"suggested_spread_threshold": float, "portfolio_health": "POOR" or "GOOD" or "EXCELLENT", "recommendation": "detailed optimization strategy"}}
+        {{"regime": "TRENDING" or "RANGING" or "VOLATILE", "volatility": integer 0-10, "sentiment": float -1.0 to 1.0, "support": float, "resistance": float, "reasoning": "brief string explanation"}}
         """
 
         try:
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
                 model=self.model_id,
-                contents=prompt
+                contents=prompt,
             )
             return self._clean_and_parse_json(response.text)
-        except Exception as e:
-            logger.error(f"StrategyAdvisor API Error: {e}")
+        except Exception as exc:
+            logger.error(f"MarketAnalyst API Execution Error: {exc}")
             return self._clean_and_parse_json("")

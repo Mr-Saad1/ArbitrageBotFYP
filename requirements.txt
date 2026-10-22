@@ -1,37 +1,35 @@
-# --- PROD STABLE REQUIREMENTS v7.0 ---
+# --- PROD STABLE REQUIREMENTS v7.1 ---
 
 # Core API & Server
-fastapi
-uvicorn
-python-dotenv
-pydantic
-pydantic-settings
-python-multipart
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+pydantic-settings>=2.7.0
+python-multipart>=0.0.9
+
+gunicorn>=22.0.0
 
 # Security & Authentication
-passlib[bcrypt]
-python-jose[cryptography]
-cryptography
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.1.0
+cryptography>=42.0.0
 
 # AI & Prediction Core (GRU)
-torch
-numpy
-pandas
-scikit-learn
-joblib
+torch>=2.2.0
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+joblib>=1.1.0
 
 # LLM Intelligence Layer
-google-genai
-google-generativeai
-groq
-openai
+google-genai>=1.0.0
+groq>=0.8.0
+openai>=1.0.0
 
 # Data Processing & Visualization
-matplotlib
+matplotlib>=3.8.0
 
 # Trading & External APIs
-ccxt
-requests
-
-# System Logging
-logging
+ccxt>=4.4.0
+requests>=2.32.0
